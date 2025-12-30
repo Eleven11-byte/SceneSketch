@@ -12,6 +12,7 @@ from functools import reduce
 from operator import mul
 import copy
 from models.prompt_extractor import LearnablePromptExtractor
+from utils.utils_visualization import visualize_attn_map
 
 
 class ModifiedCLIP(nn.Module):
@@ -490,22 +491,44 @@ class ModifiedCLIP(nn.Module):
             - or tokenized tensor
         """
         if use_prompt and self.prompt_extractor is not None:
+            # FIXME：用到prompt_extractor时再改
             return self.prompt_extractor(texts, self.model)
 
         if use_template_embedding:
-            return self._encode_text_with_templates(texts)
+            text_features = self._encode_text_with_templates(texts)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+            return text_features
+        else:  # FIXME: 原训练代码会在这里出错，因为输入的是caption_tokenized
+            texts = clip.tokenize(texts).to(self.device)
+            text_features = self.model.encode_text(texts)
+            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+            return text_features
 
-        if self.mode == "train":
-            return self.model.encode_text(texts)
-        else:
-            with torch.no_grad():
-                return self.model.encode_text(texts)
-
+    """
     def encode_image_pri(self, img: torch.Tensor):
         return self.encode_image_pri(img)
+    """
+
+    def encode_image(self, img: torch.Tensor, type: str, select_layers=None):
+        """
+        visual encoder
+        :param img:
+        :param type:
+        :param select_layers:
+        :return: img_feature, attn, sketch_mid_feats
+        """
+        if type == "sketch":
+            img_feature, attn, sketch_mid_feats = self.model.encode_image(img)
+            img_feature = img_feature / img_feature.norm(dim=-1, keepdim=True)
+            sketch_mid_feats = sketch_mid_feats / sketch_mid_feats.norm(dim=-1, keepdim=True)
+            return img_feature, attn, sketch_mid_feats
+        elif type == "image":
+            img_feature_pri = self.visual_encoder_copy.forward(img, return_layers=select_layers)
+            img_feature_pri = img_feature_pri / img_feature_pri.norm(dim=-1, keepdim=True)
+            return img_feature_pri
 
     def forward(self, img: torch.Tensor, tokenized_text=None, text_classes=None, bg_classes=None, pri_img=None,
-                select_layers=None):
+                select_layers=None, idx=0):
         if self.mode == "train":
             B = img.shape[0]  # 新增：获取批量大小
             self.img_h, self.img_w = img.shape[2] // self.patch_size, img.shape[3] // self.patch_size
@@ -544,10 +567,8 @@ class ModifiedCLIP(nn.Module):
             # 文本特征处理
             # text_features = torch.cat([fg_text_features, bg_text_features, fg_text_features.mean(0, True)], dim=0)
             # TODO：如何处理bg_text_features
-            fg_text_features = self.encode_text(text_classes, use_template_embedding=not self.use_prompt,
-                                                use_prompt=self.use_prompt)
-            bg_text_features = self.encode_text(bg_classes, use_template_embedding=not self.use_prompt,
-                                                use_prompt=self.use_prompt)
+            fg_text_features = self.encode_text(text_classes, use_template_embedding=not self.use_prompt,use_prompt=self.use_prompt)
+            bg_text_features = self.encode_text(bg_classes, use_template_embedding=not self.use_prompt,use_prompt=self.use_prompt)
             # redundant_features = self.encode_text([""])
             # text_features = torch.cat([fg_text_features-redundant_features,fg_text_features.mean(0, True)], dim=0)
             text_features = torch.cat([fg_text_features, fg_text_features.mean(0, True)], dim=0)
@@ -560,11 +581,6 @@ class ModifiedCLIP(nn.Module):
                     seg = self.classify(img_feature, text_features)[1][:, 1:]
                 seg = seg.transpose(-1, -2).reshape(-1, len(text_features), self.img_h, self.img_w)
                 seg = seg.softmax(-3)[:, :len(fg_text_features)]
-                if self.cfg.sliding_crop_size > 0:
-                    seg_slide = self.forward_slide(img, text_features, crop_size=self.cfg.sliding_crop_size).to(
-                        seg.dtype)
-                    seg_slide = seg_slide.softmax(-3)[:, :len(fg_text_features)]
-                    seg = seg_slide * 0.5 + seg * 0.5
 
                 seg_last = seg[self.select_layer]
                 seg_last[seg_last < seg_last.amax((-1, -2), keepdim=True) * self.cfg.attention_thr] = 0
@@ -579,53 +595,9 @@ class ModifiedCLIP(nn.Module):
                        "attn_map": attn.mean(0)[1:, 1:].clone()}
 
             seg = results["seg"]
-            # visualize_attn_map(segment_results["attn_map"], img, patch_size=14)
+            # visualize_attn_map(results["attn_map"], img, patch_size=16)
+            # TODO: 把可视化代码移到外面
+            # visualize_attn_map(results["attn_map"],img,patch_size=self.patch_size,agg="mean",save_path="./attn_vv/",save_name=f"img_{idx}_layer{self.select_layer}.png",show=False)
             final_score = seg.amax(dim=(-1, -2))
-            # pred_mask = self.refinement(ori_img, seg)
-            # final_score = pred_mask.amax(dim=(-1, -2)) * 0.5 + final_score * 0.5
             torch.cuda.empty_cache()
-            # return pred_mask, final_score
             return seg, final_score
-
-    def forward_slide(self, img: torch.Tensor, text_features: torch.Tensor, stride: int = 112,
-                      crop_size: int = 224):  # 224
-
-        _, _, h_img, w_img = img.shape
-        h_grids = max(h_img - crop_size + stride - 1, 0) // stride + 1
-        w_grids = max(w_img - crop_size + stride - 1, 0) // stride + 1
-        preds = img.new_zeros((self.layers, len(text_features),
-                               h_img // self.patch_size, w_img // self.patch_size)).to(img.dtype)
-        attns = img.new_zeros((h_img // self.patch_size, w_img // self.patch_size,
-                               (h_img // self.patch_size), (w_img // self.patch_size)))
-        count_mat = img.new_zeros((1, h_img // self.patch_size, w_img // self.patch_size)).to(img.dtype)
-        count_mat_attns = torch.zeros_like(attns)
-        for h_idx in range(h_grids):
-            for w_idx in range(w_grids):
-                y1, x1 = h_idx * stride, w_idx * stride
-                y2, x2 = min(y1 + crop_size, h_img), min(x1 + crop_size, w_img)
-                y1, x1 = max(y2 - crop_size, 0), max(x2 - crop_size, 0)
-                crop_img = img[:, :, y1:y2, x1:x2]
-                cts_h, cts_w = crop_img.shape[-2] // self.patch_size, crop_img.shape[-1] // self.patch_size
-                cts_y1, cts_y2 = y1 // self.patch_size, y2 // self.patch_size
-                cts_x1, cts_x2 = x1 // self.patch_size, x2 // self.patch_size
-                with torch.no_grad():
-                    img_feature, attn = self.model.encode_image(crop_img)
-                    # img_feature = torch.einsum("mn, bnt->bmt", attn.mean(0)[1:, 1:], img_feature[:, 1:])
-                    img_feature = img_feature[:, 1:]
-                    seg = self.classify(img_feature, text_features)[1]
-                    # seg = torch.einsum("mn, bnt->bmt", attn.mean(0)[1:, 1:], seg)# [:, 1:]  # [N, L, T]
-                seg = seg.transpose(-1, -2).reshape(-1, len(text_features), cts_h, cts_w)
-                attns[cts_y1: cts_y2, cts_x1: cts_x2,
-                cts_y1: cts_y2, cts_x1: cts_x2] += attn.mean(0)[1:, 1:].reshape(cts_h, cts_w, cts_h, cts_w)
-                count_mat_attns[cts_y1: cts_y2, cts_x1: cts_x2, cts_y1: cts_y2, cts_x1: cts_x2] += 1
-
-                preds[..., cts_y1: cts_y2, cts_x1: cts_x2] += seg
-                count_mat[..., cts_y1: cts_y2, cts_x1: cts_x2] += 1
-
-        preds /= count_mat
-        attns /= count_mat_attns + 1e-5
-        attns = attns.flatten(0, 1).flatten(-2, -1)
-        attns /= attns.sum(dim=-1, keepdim=True)
-        preds = preds.flatten(-2, -1) @ attns
-        preds = preds.unflatten(-1, sizes=(h_img // self.patch_size, w_img // self.patch_size))
-        return preds

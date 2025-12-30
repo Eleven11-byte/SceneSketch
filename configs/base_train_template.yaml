@@ -1,0 +1,80 @@
+# 基础配置：用于草图语义分割训练部分
+
+dataset:
+  name: "FSCOCOSeg"
+  root: "/home/xiaoyi/project/OpenSketchSeg/DATA/fscoco-seg/train"
+
+train:
+  batch_size: 4
+  epochs: 20
+  lr: 1e-6
+  optimizer: "adamw"
+  weight_decay: 1e-4
+  save_every: 5
+  num_workers: 8
+  ft_all: True
+  max_classes: 3
+  threshold: 0.4
+  margin: 0.5
+  freeze_text: True
+  use_distill: False # 即启用后续的distill loss
+
+MODEL: # 保留SSS方法加载模型时需要的参数设置
+  TRANSFER_TYPE: none
+  USE_PROMPT: False
+  PROMPT:
+    NUM_PREFIX: 5  #加在text处的prompt设置
+    NUM_SUFFIX: 0
+    NUM_TOKENS: 0
+    LOCATION: prepend
+    INITIATION: random
+    CLSEMB_FOLDER: ''
+    CLSEMB_PATH: ''
+    PROJECT: -1
+    DEEP: false
+    LOG: train_run1
+    NUM_DEEP_LAYERS: null
+    REVERSE_DEEP: false
+    DEEP_SHARED: false
+    FORWARD_DEEP_NOEXPAND: false
+    HEAD: false
+    HEAD_CLASS: false
+    TRAINABLE_PARM: prompt,head
+    VIT_POOL_TYPE: original
+    DROPOUT: 0.1
+    SAVE_FOR_EACH_EPOCH: false
+
+loss: # 有蒸馏损失，后面应该还会改，暂时这样
+  # add_loss_type: "direct"
+  # add_align_weight: False
+  # add_distill_weight: False
+  # add_loss: True
+  add_weight: 0.1
+  distill_layers: [7, 10]
+  # add_loss2_weight: 0.0
+  # distill_tau: 0.2
+  # distill_weight: 0.5
+  # triplet_weight: 0.2
+
+wandb:
+  enable: false
+  project: "sketch-cliper-project"
+  name: "debug_1230_run2"
+
+model_name: "ViT-B/16"
+semantic_templates: "template/car_template.txt"
+attn_type: fused-attn #vanilla #v-v #fused-attn
+fuse_feature: True
+size: 224
+
+logit_scale: 150
+bkg_thre: 0
+
+select_layer: -1 # 决定融合的层和输出的层的结果
+sliding_crop_size: 0 #224
+
+attention_thr: 0.12
+segmentation_threshold: 0.4
+class_threshold: 0.5
+
+mode: "train" #"test"

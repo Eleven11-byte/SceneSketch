@@ -1,0 +1,70 @@
+# 基础配置：用于草图语义分割 baseline
+experiment:
+  name: "sketchseg_test"
+  seed: 42
+  output_dir: "./outputs"
+  log_dir: "./logs"
+
+dataset:
+  name: "FSCOCOSeg"
+  root: "/home/xiaoyi/project/OpenSketchSeg/DATA/fscoco-seg/train"
+  # num_classes: 45
+  # image_size: 256
+  # train_split: "train"
+  # val_split: "val"
+
+train:
+  batch_size: 8
+  epochs: 20
+  lr: 1e-6
+  optimizer: "adamw"
+  weight_decay: 1e-4
+  # scheduler: "cosine"
+  save_every: 10
+  num_workers: 8
+  ft_all: True
+  max_classes: 3
+  threshold: 0.4
+  margin: 0.5
+
+MODEL:
+  TRANSFER_TYPE: "prompt"
+  PROMPT:
+    NUM_TOKENS: 3
+    LOCATION: prepend
+    INITIATION: random
+    CLSEMB_FOLDER: ''
+    CLSEMB_PATH: ''
+    PROJECT: -1
+    DEEP: false
+    LOG: train_run1
+    NUM_DEEP_LAYERS: null
+    REVERSE_DEEP: false
+    DEEP_SHARED: false
+    FORWARD_DEEP_NOEXPAND: false
+    HEAD: false
+    HEAD_CLASS: false
+    TRAINABLE_PARM: prompt,head
+    VIT_POOL_TYPE: original
+    DROPOUT: 0.1
+    SAVE_FOR_EACH_EPOCH: false
+
+model: "normal"
+  # encoder: "resnet50"
+  # decoder: "mask_decoder"
+  # pretrained_clip: null  # 或 "./checkpoints/clip_vit_b16.pt"
+
+loss:
+  add_loss_type: "none"
+  add_align_weight: False
+  add_distill_weight: False
+  add_loss1_weight: 0.1
+  add_loss2_weight: 0.0
+  distill_tau: 0.5
+  # distill_weight: 0.5
+  # triplet_weight: 0.2
+
+wandb:
+  enable: true
+  project: "sketch-segmentation"
+  name: "1219_run1_train_addloss"

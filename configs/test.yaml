@@ -1,0 +1,62 @@
+dataset:
+  name: FSCOCOSeg
+  root: /home/xiaoyi/project/OpenSketchSeg/DATA/fscoco-seg/train
+train:
+  batch_size: 4
+  epochs: 20
+  lr: 1e-6
+  optimizer: adamw
+  weight_decay: 1e-4
+  save_every: 5
+  num_workers: 8
+  ft_all: true
+  max_classes: 3
+  threshold: 0.4
+  margin: 0.5
+  freeze_text: true
+  use_distill: true
+MODEL:
+  TRANSFER_TYPE: none
+  USE_PROMPT: false
+  PROMPT:
+    NUM_PREFIX: 5
+    NUM_SUFFIX: 0
+    NUM_TOKENS: 0
+    LOCATION: prepend
+    INITIATION: random
+    CLSEMB_FOLDER: ''
+    CLSEMB_PATH: ''
+    PROJECT: -1
+    DEEP: false
+    LOG: train_run1
+    NUM_DEEP_LAYERS: null
+    REVERSE_DEEP: false
+    DEEP_SHARED: false
+    FORWARD_DEEP_NOEXPAND: false
+    HEAD: false
+    HEAD_CLASS: false
+    TRAINABLE_PARM: prompt,head
+    VIT_POOL_TYPE: original
+    DROPOUT: 0.1
+    SAVE_FOR_EACH_EPOCH: false
+loss:
+  add_weight: 0.1
+  distill_layer: 7
+wandb:
+  enable: true
+  project: sketch-cliper-project
+  name: debug_run_1220
+model_name: ViT-B/16
+semantic_templates: template/car_template.txt
+attn_type: fused-attn
+fuse_feature: true
+size: 224
+logit_scale: 150
+bkg_thre: 0
+select_layer: -1
+sliding_crop_size: 0
+attention_thr: 0.12
+segmentation_threshold: 0.4
+class_threshold: 0.5
+mode: test
+checkpoint_path: /home/xiaoyi/PycharmProjects/KDSketchSeg/checkpoint/debug_run_1220/model_20.pth
