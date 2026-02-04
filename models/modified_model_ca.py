@@ -13,11 +13,12 @@ from operator import mul
 import copy
 from models.prompt_extractor import LearnablePromptExtractor
 from utils.utils_visualization import visualize_attn_map
+from models.ca import Cross_Attention, CrossAttnRefiner
 
 
-class ModifiedCLIP(nn.Module):
+class ModifiedCLIP_ca(nn.Module):
     def __init__(self, cfg, device):
-        super(ModifiedCLIP, self).__init__()
+        super(ModifiedCLIP_ca, self).__init__()
         self.cfg = cfg
         self.device = device
         self.attn_type = cfg.attn_type
@@ -64,6 +65,8 @@ class ModifiedCLIP(nn.Module):
             self.model = model
         elif self.mode == "test":
             self.model = model.eval()
+            self.model.visual.transformer._mode = "test"
+
 
         self.preprocess = ttf.Compose([self._resize] + preprocess.transforms[2:])
         self.patch_size = int(cfg.model_name.split("/")[-1])  # TODO: 后面改模型这里要改
@@ -137,13 +140,7 @@ class ModifiedCLIP(nn.Module):
 
         if self.use_prompt:
             print("using prompt")
-            self.prompt_extractor = LearnablePromptExtractor(
-                prompt_dim=512,
-                prompt_shape=(
-                    cfg.MODEL.PROMPT.NUM_PREFIX,
-                    cfg.MODEL.PROMPT.NUM_SUFFIX
-                )
-            )
+            self.prompt_extractor = LearnablePromptExtractor(prompt_dim=512, prompt_shape=(cfg.MODEL.PROMPT.NUM_PREFIX,cfg.MODEL.PROMPT.NUM_SUFFIX))
             self.prompt_extractor.init_buffer(self.model)
         else:
             self.prompt_extractor = None
@@ -158,6 +155,24 @@ class ModifiedCLIP(nn.Module):
             p.requires_grad = False
         """
         self.model.positional_embedding.require_grad = False
+
+        # NOTE：加入cross-attention
+        self.use_cross_attn = cfg.train.use_cross_attn
+        if self.use_cross_attn:
+            """
+            self.cross_attn = Cross_Attention(
+                h=getattr(cfg, "cross_attn_heads", 8),
+                n=getattr(cfg, "cross_attn_layers", 1),
+                d_model=model.visual.transformer.width if hasattr(model.visual.transformer, "width") else 768,
+                d_ff=getattr(cfg, "cross_attn_ffn", 1024),
+                dropout=getattr(cfg, "cross_attn_dropout", 0.1),
+            )
+            # 用 gate 控制 cross-attn 强度（更稳）
+            self.cross_gate = nn.Parameter(torch.tensor(0.0))  # 初始为 0，先等价于不加
+            """
+
+            self.cross_attn_refiner = CrossAttnRefiner()
+
 
     def custom_attn(self, attn_layer, x, attn_mask=None):
 
@@ -371,9 +386,28 @@ class ModifiedCLIP(nn.Module):
             x = x + ln_x.clone()
             x = x + model_transformer.resblocks[i].mlp(model_transformer.resblocks[i].ln_2(x)).clone()
 
+        # x_batch_first = x.permute(1, 0, 2)
+
+        text_ctx = getattr(model_transformer, "_cross_text_ctx", None)
+        mode = getattr(model_transformer, "_mode", "train") # FIXME：测试阶段
+        if text_ctx is not None:
+            # x_batch_first = self.cross_attn_refiner(x_batch_first, text_ctx)
+            if mode == "test":
+                C = text_ctx.shape[0]
+                expanded_features = []
+                for i in range(self.layers):
+                    expanded_features.append(torch.repeat_interleave(img_features[i], C, dim=1))
+                # 将当前的 x 也扩展，以便进入第 12 层做 Cross-Attention
+                x = torch.repeat_interleave(x, C, dim=1)
+                img_features = torch.stack(expanded_features, dim=0)
+
+        x = self.cross_attn_refiner(x, text_ctx)
+        # x = x_batch_first.permute(1, 0, 2)
         # 计算最后一层
         model_res = model_transformer.resblocks[-1]
+        # NOTE: 最后一层跳过了FFN（residual + MLP）
         img_features[-1] = x if self.fuse_feature or self.select_layer == -1 else 0
+
         for kth, x in enumerate(img_features):
             x_k = img_features[kth].clone()
             input_lnx = model_res.ln_1(x_k)
@@ -527,26 +561,37 @@ class ModifiedCLIP(nn.Module):
             img_feature_pri = img_feature_pri / img_feature_pri.norm(dim=-1, keepdim=True)
             return img_feature_pri
 
-    def forward(self, img: torch.Tensor, tokenized_text=None, text_classes=None, bg_classes=None, pri_img=None, select_layers=None, idx=0, fuse_type="default"):
+    def encode_image_ca(self, img: torch.Tensor, text_features):
+        # self.model.visual.transformer._cross_text_ctx = text_features
+        img_feature, attn, sketch_mid_feats = self.model.encode_image(img, text_ctx=text_features)
+        img_feature = img_feature / img_feature.norm(dim=-1, keepdim=True)
+        sketch_mid_feats = sketch_mid_feats / sketch_mid_feats.norm(dim=-1, keepdim=True)
+        return img_feature, attn, sketch_mid_feats
+
+    def forward(self, img: torch.Tensor, tokenized_text=None, text_classes=None, bg_classes=None, pri_img=None,
+                select_layers=None, idx=0):
         if self.mode == "train":
             B = img.shape[0]  # 新增：获取批量大小
             self.img_h, self.img_w = img.shape[2] // self.patch_size, img.shape[3] // self.patch_size
-            assert isinstance(self.img_h, int) and isinstance(self.img_w,
-                                                              int), "Batch images must have the same size"
+            assert isinstance(self.img_h, int) and isinstance(self.img_w, int), "Batch images must have the same size"
             if tokenized_text is not None:
-                # text_features = self.encode_text(tokenized_text, use_template_embedding=False)  # TODO: 在此处修改是否需要用模板
+                # text_features = self.encode_text(tokenized_text, use_template_embedding=False)
                 text_features = self.encode_text(tokenized_text, use_template_embedding=False, use_prompt=False)
             else:
+                # FIXME: 在此处修改是否需要用模板
                 # text_features = self.encode_text(text_classes, use_template_embedding=True)
                 text_features = self.encode_text(
                     text_classes,
-                    use_template_embedding=not self.use_prompt,
-                    use_prompt=self.use_prompt
+                    use_template_embedding=False,
+                    use_prompt=False
                 )
 
             text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-            # 图像特征处理
 
+            # NOTE：插入text_features
+            self.model.visual.transformer._cross_text_ctx = text_features
+
+            # 图像特征处理
             # sketch_mid_feats = self.forward_transformer_intermediate(x, return_layers=(7, 10))
 
             img_feature, attn, sketch_mid_feats = self.model.encode_image(img)
@@ -573,6 +618,8 @@ class ModifiedCLIP(nn.Module):
             text_features = torch.cat([fg_text_features, fg_text_features.mean(0, True)], dim=0)
             # 图像特征处理
             with torch.no_grad():
+                # text_features
+                self.model.visual.transformer._cross_text_ctx = text_features
                 img_feature, attn, _ = self.model.encode_image(img)
                 if self.add_prompt:
                     seg = self.classify(img_feature, text_features)[1][:, 1 + self.num_tokens:]  # TODO：加入visual prompt
@@ -588,39 +635,8 @@ class ModifiedCLIP(nn.Module):
                 else:
                     seg_last = seg_last.flatten(-2, -1) @ attn.mean(0)[1:, 1:]  # 乘以注意力
                 seg_last = seg_last.unflatten(dim=-1, sizes=(self.img_h, self.img_w))
-
-                # if idx==0:
-                    # print(fuse_type)
-                if fuse_type == "default":
-                    seg_to_fuse = seg.mean(0)
-                    seg = seg_last + (seg.mean(0) if self.fuse_feature else 0)
-                elif fuse_type == "weighted":
-                    # 假设有 12 层，我们给最后一层 0.5 的权重，其余 11 层平分剩下的 0.5
-                    weight = 0.6
-                    num_layers = seg.shape[0]
-                    weights = torch.ones(num_layers, device=seg.device) * ((1-weight) / (num_layers - 1))
-                    weights[-1] = weight  # 设置最后一层权重
-                    # 将 weights 维度对齐到 [Layers, 1, 1, 1] 以便进行广播乘法
-                    weights = weights.view(-1, 1, 1, 1)
-                    seg_to_fuse = (seg * weights).sum(0)
-                elif fuse_type == "select_layers":
-                    num_layers_to_fuse = 5
-                    seg_to_fuse = seg[-num_layers_to_fuse:].mean(0)
-                elif fuse_type == "select_layers + add_weight":
-                    weight = 0.5
-                    num_layers_to_fuse = 10
-                    seg_layers = seg[-num_layers_to_fuse:]
-                    num_layers = seg_layers.shape[0]
-                    weights = torch.ones(num_layers, device=seg.device) * ((1 - weight) / (num_layers - 1))
-                    weights[-1] = weight  # 设置最后一层权重
-                    # 将 weights 维度对齐到 [Layers, 1, 1, 1] 以便进行广播乘法
-                    weights = weights.view(-1, 1, 1, 1)
-                    seg_to_fuse = (seg_layers * weights).sum(0)
-                else:
-                    seg_to_fuse = 0
-
-                # NOTE：聚合最后N层
-                seg = seg_last + seg_to_fuse
+                seg = seg_last + (seg.mean(0) if self.fuse_feature else 0)
+                # seg = seg_last # NOTE：加入多层平均分割结果
 
             results = {"seg": seg.detach(), "img_part_features": img_feature.clone(), "mid_feature": None,
                        "attn_map": attn.mean(0)[1:, 1:].clone()}

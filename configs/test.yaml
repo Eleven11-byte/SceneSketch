@@ -14,7 +14,7 @@ train:
   threshold: 0.4
   margin: 0.5
   freeze_text: true
-  use_distill: true
+  use_distill: false
 MODEL:
   TRANSFER_TYPE: none
   USE_PROMPT: false
@@ -59,4 +59,6 @@ attention_thr: 0.12
 segmentation_threshold: 0.4
 class_threshold: 0.5
 mode: test
-checkpoint_path: /home/xiaoyi/PycharmProjects/KDSketchSeg/checkpoint/debug_run_1220/model_20.pth
+fuse_type: select_layers
+checkpoint_path: /media/xiaoyi/data/checkpoint/remote_1230_run3/model_20.pth
+# /home/xiaoyi/PycharmProjects/KDSketchSeg/checkpoint/debug_run_1220/model_20.pth

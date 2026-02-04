@@ -1,6 +1,7 @@
+
 import numpy as np
 import torch
-import json
+
 torch.autograd.set_detect_anomaly(True)
 from configs.config import Config
 from torchvision.transforms import InterpolationMode
@@ -12,6 +13,7 @@ from dataset import fscoco_train, SketchImageDataset
 # from vpt.launch import default_argument_parser
 from torchvision.transforms import Compose, Resize, ToTensor, Normalize
 import random
+import json
 """
 from utils.utils import get_similarity_map, zero_clapping, get_train_classes, \
     tensor_to_binary_img, sketch_text_image_pairs, get_threshold, triplet_loss_func_L1, get_train_classes_with_image, \
@@ -24,7 +26,7 @@ from tqdm import tqdm
 from models.modified_model import ModifiedCLIP
 from utils.utils_loss import img_sketch_align_loss, patch_distribution_distill_loss,triplet_loss_func_L1
 from utils.utils_train import print_trainable_params, get_similarity_map, zero_clapping, tensor_to_binary_img, sketch_text_pairs, get_threshold,\
-    get_train_classes_with_image, sketch_text_image_pairs, save_checkpoint, load_checkpoint, get_train_classes
+    get_train_classes_with_image, sketch_text_image_pairs, save_checkpoint, load_checkpoint
 
 # torch.autograd.set_detect_anomaly(True)  # NOTE：启用异常检测
 
@@ -38,7 +40,6 @@ def main(configs):
 
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # device = torch.device("cpu")
 
     model = ModifiedCLIP(cfg=cfg, device=device)
     model = model.float()
@@ -51,10 +52,17 @@ def main(configs):
     model.to(device)
     print("Model loaded successfully")
 
-    train_dataset = fscoco_train(root=cfg.dataset.root, transform=preprocess, augment=False)  # Load the training dataset #NOTE: 未进行数据增强
+    # NOTE：初始化add_weight参数
+    if cfg.train.use_distill:
+        print("Using distill")
+        a1 = cfg.loss.add_weight
+
+    train_dataset = SketchImageDataset(root=cfg.dataset.root, transform=preprocess, augment=False)  # Load the training dataset #NOTE: 未进行数据增强
     train_dataloader = DataLoader(train_dataset, batch_size=cfg.train.batch_size, shuffle=True, num_workers=8)
 
     print("Extracting classes from training dataset.. This might take a minute.")
+    # FIXME：排序后再加载train_classes，保证获取到一样的class列表
+    # train_classes = get_train_classes_with_image(train_dataset, max_classes=cfg.train.max_classes)
 
     learnable_threshold = nn.Parameter(torch.tensor(cfg.train.threshold))  # Initialize with default threshold
     threshold_optimizer = torch.optim.AdamW([learnable_threshold], lr=1e-4)
@@ -77,7 +85,7 @@ def main(configs):
     last_ckpt_path = os.path.join(ckpt_dir, "last.pth")
 
     if os.path.exists(last_ckpt_path):
-        start_epoch, global_step = load_checkpoint(
+        start_epoch, global_step, train_classes = load_checkpoint(
             last_ckpt_path,
             model,
             vit_optimizer,
@@ -93,7 +101,7 @@ def main(configs):
             print(f"读取类别文件成功, 共{train_classes.shape[0]}类")
         else:
             print("Extracting classes from training dataset.. This might take a minute.")
-            train_classes = get_train_classes(train_dataset, max_classes=cfg.train.max_classes)
+            train_classes = get_train_classes_with_image(train_dataset, max_classes=cfg.train.max_classes)
             # NOTE: 保存train_classes
             json_save_path = "./train_classes.json"  # json保存路径
             with open(json_save_path, 'w', encoding='utf-8') as f:
@@ -116,18 +124,20 @@ def main(configs):
 
         pbar = tqdm(train_dataloader, total=len(train_dataloader), desc=f"Epoch {epoch + 1}/{num_epochs}")
 
-        for batch_idx, (sketches, captions) in enumerate(pbar):
+        for batch_idx, (sketches, captions, images) in enumerate(pbar):
+            # for batch_idx, (sketches,captions,images) in enumerate(train_dataloader):
+
             # 数据预处理
             sketches = sketches.view(-1, 3, 224, 224).to(device)
-
-            sketches_w, classes, captions_pair = sketch_text_pairs(sketches, captions, max_classes=cfg.train.max_classes)
+            images = images.view(-1, 3, 224, 224).to(device)
+            sketches_w, classes, captions_pair, images_pair = sketch_text_image_pairs(sketches, captions, images, max_classes=cfg.train.max_classes)
 
             sketches_w_binary = tensor_to_binary_img(sketches_w, device)
             sketches_b = 1 - sketches_w_binary
 
-
             caption_features = model.encode_text(captions_pair)
-            class_features = model.encode_text(classes, use_template_embedding=cfg.train.use_template_embedding) #NOTE: 可以在这里改是否在训练时使用template
+            class_features = model.encode_text(classes, use_template_embedding=True)
+
             scene_features_layers, attn, sketch_mid_feats_layers = model.encode_image(sketches_w, type="sketch")
 
             scene_features = scene_features_layers[-1].permute(1, 0, 2)  # FIXME: 改具体的层数，目前取最后一层对齐
@@ -164,8 +174,25 @@ def main(configs):
             triplet_loss_l7 = triplet_loss_func_L1(w_sketch_features_l7[:, 0, :], class_features, labels, margin=cfg.train.margin)
             triplet_loss_l10 = triplet_loss_func_L1(w_sketch_features_l10[:, 0, :], class_features, labels, margin=cfg.train.margin)
 
+            # loss = (1 -a1)*(triplet_loss_scene + triplet_loss_final_layer + triplet_loss_l7 + triplet_loss_l10) + a1 * sk_im_align_loss
+            if cfg.train.use_distill:
+                # NOTE:蒸馏损失计算部分, patch_distribution
+                img_mid_feats = model.encode_image(images_pair, type="image", select_layers=cfg.loss.distill_layers)
+                distill_layers = cfg.loss.distill_layers
+                sketch_mid_feats = torch.stack([sketch_mid_feats_layers[l].permute(1, 0, 2) for l in distill_layers],
+                                               dim=0).to(device)
 
-            loss = triplet_loss_scene + triplet_loss_final_layer + triplet_loss_l7 + triplet_loss_l10
+                im = img_mid_feats[:, :, 1:, :]
+                sk = sketch_mid_feats[:, :, 1:, :]  # [L, B, P, 768]
+                sk_im_align_loss = 0
+
+                for i in range(len(distill_layers)):
+                    sk_im_align_loss_layer = patch_distribution_distill_loss(sk[i], im[i])
+                    sk_im_align_loss = sk_im_align_loss + sk_im_align_loss_layer
+
+                loss = (1 - a1) * (triplet_loss_scene + triplet_loss_final_layer + triplet_loss_l7 + triplet_loss_l10) + a1 * sk_im_align_loss
+            else:
+                loss = triplet_loss_scene + triplet_loss_final_layer + triplet_loss_l7 + triplet_loss_l10
 
             total_loss += loss.item()
             batch_count += 1
@@ -195,6 +222,9 @@ def main(configs):
                     "train/loss": loss.item(),
                     "train/threshold": threshold_value.item(),
                 }
+
+                if cfg.train.use_distill:
+                    log_dict["train/distill_loss"] = sk_im_align_loss.item()
                 wandb.log(log_dict, step=global_step)
 
             epoch_avg_loss = total_loss / batch_count
@@ -217,6 +247,7 @@ def main(configs):
                 "numpy": np.random.get_state(),
                 "random": random.getstate(),
             },
+            "train_classes": train_classes,
         }
 
         save_checkpoint(checkpoint, f"{ckpt_dir}/last.pth")

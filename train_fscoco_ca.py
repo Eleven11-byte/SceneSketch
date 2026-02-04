@@ -21,7 +21,7 @@ import wandb
 import os
 import torch.nn.functional as F
 from tqdm import tqdm
-from models.modified_model import ModifiedCLIP
+from models.modified_model_ca import ModifiedCLIP_ca
 from utils.utils_loss import img_sketch_align_loss, patch_distribution_distill_loss,triplet_loss_func_L1
 from utils.utils_train import print_trainable_params, get_similarity_map, zero_clapping, tensor_to_binary_img, sketch_text_pairs, get_threshold,\
     get_train_classes_with_image, sketch_text_image_pairs, save_checkpoint, load_checkpoint, get_train_classes
@@ -40,10 +40,10 @@ def main(configs):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # device = torch.device("cpu")
 
-    model = ModifiedCLIP(cfg=cfg, device=device)
+    model = ModifiedCLIP_ca(cfg=cfg, device=device)
     model = model.float()
 
-    # print_trainable_params(model) #NOTE:用于训练过程中检查参数是否更新
+    print_trainable_params(model) #NOTE:用于训练过程中检查参数是否更新
     init_params = {name: param.clone().detach().to(device) for name, param in model.named_parameters() if
                    param.requires_grad}
     # print(init_params)
@@ -126,9 +126,14 @@ def main(configs):
             sketches_b = 1 - sketches_w_binary
 
 
-            caption_features = model.encode_text(captions_pair)
-            class_features = model.encode_text(classes, use_template_embedding=cfg.train.use_template_embedding) #NOTE: 可以在这里改是否在训练时使用template
-            scene_features_layers, attn, sketch_mid_feats_layers = model.encode_image(sketches_w, type="sketch")
+            # caption_features = model.encode_text(captions_pair)
+            # class_features = model.encode_text(classes, use_template_embedding=cfg.train.use_template_embedding) #NOTE: 可以在这里改是否在训练时使用template
+            # scene_features_layers, attn, sketch_mid_feats_layers = model.encode_image(sketches_w, type="sketch")
+
+            output_stage1 = model(sketches_b, text_classes=classes)
+
+            scene_features_layers = output_stage1[0]
+            class_features = output_stage1[1]
 
             scene_features = scene_features_layers[-1].permute(1, 0, 2)  # FIXME: 改具体的层数，目前取最后一层对齐
 
@@ -150,7 +155,10 @@ def main(configs):
 
             # w_sketch_features, caption_features, _ = model(w_sketches_white, tokenized_text=tokenized_captions)
 
-            w_sketch_features, attn, _ = model.encode_image(w_sketches_white, type="sketch")
+            # w_sketch_features, attn, _ = model.encode_image(w_sketches_white, type="sketch")
+            output_stage2 = model(w_sketches_white, tokenized_text=captions_pair)
+            w_sketch_features = output_stage2[0]
+            caption_features = output_stage2[1]
 
             w_sketch_features_l7 = w_sketch_features[7 - 1].permute(1, 0, 2)
             w_sketch_features_l10 = w_sketch_features[10 - 1].permute(1, 0, 2)

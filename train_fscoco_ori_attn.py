@@ -24,9 +24,13 @@ from tqdm import tqdm
 from models.modified_model import ModifiedCLIP
 from utils.utils_loss import img_sketch_align_loss, patch_distribution_distill_loss,triplet_loss_func_L1
 from utils.utils_train import print_trainable_params, get_similarity_map, zero_clapping, tensor_to_binary_img, sketch_text_pairs, get_threshold,\
-    get_train_classes_with_image, sketch_text_image_pairs, save_checkpoint, load_checkpoint, get_train_classes
+    get_train_classes_with_image, sketch_text_image_pairs, save_checkpoint, load_checkpoint, get_train_classes, get_attention_map, zero_clapping_attn
 
-# torch.autograd.set_detect_anomaly(True)  # NOTE：启用异常检测
+# torch.autograd.set_detect_anomaly(True)
+
+"""
+改训练过程中的阈值处理机制
+"""
 
 def main(configs):
     cfg = configs
@@ -38,7 +42,6 @@ def main(configs):
 
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # device = torch.device("cpu")
 
     model = ModifiedCLIP(cfg=cfg, device=device)
     model = model.float()
@@ -77,7 +80,7 @@ def main(configs):
     last_ckpt_path = os.path.join(ckpt_dir, "last.pth")
 
     if os.path.exists(last_ckpt_path):
-        start_epoch, global_step = load_checkpoint(
+        start_epoch, global_step, train_classes = load_checkpoint(
             last_ckpt_path,
             model,
             vit_optimizer,
@@ -127,11 +130,13 @@ def main(configs):
 
 
             caption_features = model.encode_text(captions_pair)
-            class_features = model.encode_text(classes, use_template_embedding=cfg.train.use_template_embedding) #NOTE: 可以在这里改是否在训练时使用template
+            class_features = model.encode_text(classes, use_template_embedding=True) #NOTE: 可以在这里改是否在训练时使用template
             scene_features_layers, attn, sketch_mid_feats_layers = model.encode_image(sketches_w, type="sketch")
 
             scene_features = scene_features_layers[-1].permute(1, 0, 2)  # FIXME: 改具体的层数，目前取最后一层对齐
 
+            # NOTE: 暂时去掉similarity部分，用attention阈值过滤
+            """ 
             similarity = scene_features @ class_features.T  # 计算相似度矩阵
             patches_similarity = similarity[:, num_of_tokens + 1:, :]  # 去掉class token的相似度
             # patches_similarity = similarity[:, num_of_tokens + 1:, :] # TODO：有visual prompt时去掉visual_prompt，在无prompt时把num_tokens设置为0
@@ -142,13 +147,16 @@ def main(configs):
             threshold_value = get_threshold(learnable_threshold)  # 获取当前的可学习阈值
             # threshold_value = learnable_threshold
             weights_hard_sm = zero_clapping(similarity_maps, threshold_value)  # 低于阈值的像素置0
+            """
+            attn_map = get_attention_map(attn,image_size=sketches_w.shape[2:],patch_size=model.patch_size)
+
+            threshold_value = get_threshold(learnable_threshold)
+            weights_hard_sm = zero_clapping_attn(attn_map, threshold_value)
 
             weights_hard_sm = weights_hard_sm.unsqueeze(1).repeat(1, 3, 1, 1)  # 扩展权重的维度以匹配草图（重复3次以适配RGB通道）
             w_sketches = sketches_b * weights_hard_sm  # 应用权重到背景掩码，保留高置信度的背景区域（用于后续特征提取）
             w_sketches_white = w_sketches.max() - w_sketches  # 反转草图颜色
             w_sketches_white = preprocess_no_T(w_sketches_white)  # 对处理后的草图应用同样的预处理
-
-            # w_sketch_features, caption_features, _ = model(w_sketches_white, tokenized_text=tokenized_captions)
 
             w_sketch_features, attn, _ = model.encode_image(w_sketches_white, type="sketch")
 

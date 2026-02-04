@@ -8,15 +8,10 @@ from torchvision.transforms import InterpolationMode
 BICUBIC = InterpolationMode.BICUBIC
 from torch import nn
 from torch.utils.data import DataLoader
-from dataset import fscoco_train, SketchImageDataset
+from dataset import InkScene_train, collate_inkscene_A
 # from vpt.launch import default_argument_parser
 from torchvision.transforms import Compose, Resize, ToTensor, Normalize
 import random
-"""
-from utils.utils import get_similarity_map, zero_clapping, get_train_classes, \
-    tensor_to_binary_img, sketch_text_image_pairs, get_threshold, triplet_loss_func_L1, get_train_classes_with_image, \
-    img_sketch_align_loss, cross_modal_distill_loss, patch_distribution_distill_loss
-"""
 import wandb
 import os
 import torch.nn.functional as F
@@ -24,9 +19,8 @@ from tqdm import tqdm
 from models.modified_model import ModifiedCLIP
 from utils.utils_loss import img_sketch_align_loss, patch_distribution_distill_loss,triplet_loss_func_L1
 from utils.utils_train import print_trainable_params, get_similarity_map, zero_clapping, tensor_to_binary_img, sketch_text_pairs, get_threshold,\
-    get_train_classes_with_image, sketch_text_image_pairs, save_checkpoint, load_checkpoint, get_train_classes
-
-# torch.autograd.set_detect_anomaly(True)  # NOTE：启用异常检测
+    get_train_classes_with_image, sketch_text_image_pairs, save_checkpoint, load_checkpoint, get_train_classes,\
+    generate_caption, sketch_text_pairs_inkscene
 
 def main(configs):
     cfg = configs
@@ -39,40 +33,33 @@ def main(configs):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # device = torch.device("cpu")
-
+    # 模型加载
     model = ModifiedCLIP(cfg=cfg, device=device)
     model = model.float()
 
-    # print_trainable_params(model) #NOTE:用于训练过程中检查参数是否更新
+    print_trainable_params(model) #NOTE:用于训练过程中检查参数是否更新
     init_params = {name: param.clone().detach().to(device) for name, param in model.named_parameters() if
                    param.requires_grad}
-    # print(init_params)
 
-    model.to(device)
-    print("Model loaded successfully")
 
-    train_dataset = fscoco_train(root=cfg.dataset.root, transform=preprocess, augment=False)  # Load the training dataset #NOTE: 未进行数据增强
-    train_dataloader = DataLoader(train_dataset, batch_size=cfg.train.batch_size, shuffle=True, num_workers=8)
+    # 数据集加载
+    train_dataset = InkScene_train(root="/home/xiaoyi/project/inkscene/clipasso-base_train",
+                       class_map_json="/home/xiaoyi/project/inkscene/clipasso-base_train/mapping.json", transform=preprocess)
 
-    print("Extracting classes from training dataset.. This might take a minute.")
+    train_dataloader = DataLoader(train_dataset, batch_size=cfg.train.batch_size, shuffle=True, num_workers=8, collate_fn=collate_inkscene_A)
 
     learnable_threshold = nn.Parameter(torch.tensor(cfg.train.threshold))  # Initialize with default threshold
     threshold_optimizer = torch.optim.AdamW([learnable_threshold], lr=1e-4)
-
 
     vit_optimizer = torch.optim.AdamW(model.parameters(), lr=float(cfg.train.lr))
 
     if cfg.wandb.enable:
         wandb.init(project=cfg.wandb.project, name=cfg.wandb.name, resume="allow")
 
-    log_dir = cfg.wandb.name
-    print(f"Checkpoints will be saved to: checkpoint/{log_dir}")
-    os.makedirs(f"checkpoint/{log_dir}", exist_ok=True)
-
-    # ===== Resume logic =====
     start_epoch = 0
     global_step = 0
 
+    log_dir = cfg.wandb.name
     ckpt_dir = f"checkpoint/{log_dir}"
     last_ckpt_path = os.path.join(ckpt_dir, "last.pth")
 
@@ -116,18 +103,20 @@ def main(configs):
 
         pbar = tqdm(train_dataloader, total=len(train_dataloader), desc=f"Epoch {epoch + 1}/{num_epochs}")
 
-        for batch_idx, (sketches, captions) in enumerate(pbar):
-            # 数据预处理
-            sketches = sketches.view(-1, 3, 224, 224).to(device)
+        for batch_idx, (sketches, sketch_classes) in enumerate(pbar):
+            sketches = sketches.to(device)
+            sketch_classes = sketch_classes
 
-            sketches_w, classes, captions_pair = sketch_text_pairs(sketches, captions, max_classes=cfg.train.max_classes)
+            # sketches_w, classes, captions_pair = sketch_text_pairs(sketches, captions, max_classes=cfg.train.max_classes)
+
+            sketches_w, classes, captions_pair = sketch_text_pairs_inkscene(sketches, sketch_classes)
 
             sketches_w_binary = tensor_to_binary_img(sketches_w, device)
             sketches_b = 1 - sketches_w_binary
 
-
             caption_features = model.encode_text(captions_pair)
-            class_features = model.encode_text(classes, use_template_embedding=cfg.train.use_template_embedding) #NOTE: 可以在这里改是否在训练时使用template
+            class_features = model.encode_text(classes,
+                                               use_template_embedding=cfg.train.use_template_embedding)  # NOTE: 可以在这里改是否在训练时使用template
             scene_features_layers, attn, sketch_mid_feats_layers = model.encode_image(sketches_w, type="sketch")
 
             scene_features = scene_features_layers[-1].permute(1, 0, 2)  # FIXME: 改具体的层数，目前取最后一层对齐
@@ -159,11 +148,14 @@ def main(configs):
             class_to_idx = {name: i for i, name in enumerate(train_classes)}
             labels = torch.tensor([class_to_idx[name] for name in classes]).to(device)
 
-            triplet_loss_scene = triplet_loss_func_L1(scene_features[:, 0, :], caption_features, labels, margin=cfg.train.margin)
-            triplet_loss_final_layer = triplet_loss_func_L1(w_sketch_features_l12[:, 0, :], class_features, labels, margin=cfg.train.margin)
-            triplet_loss_l7 = triplet_loss_func_L1(w_sketch_features_l7[:, 0, :], class_features, labels, margin=cfg.train.margin)
-            triplet_loss_l10 = triplet_loss_func_L1(w_sketch_features_l10[:, 0, :], class_features, labels, margin=cfg.train.margin)
-
+            triplet_loss_scene = triplet_loss_func_L1(scene_features[:, 0, :], caption_features, labels,
+                                                      margin=cfg.train.margin)
+            triplet_loss_final_layer = triplet_loss_func_L1(w_sketch_features_l12[:, 0, :], class_features, labels,
+                                                            margin=cfg.train.margin)
+            triplet_loss_l7 = triplet_loss_func_L1(w_sketch_features_l7[:, 0, :], class_features, labels,
+                                                   margin=cfg.train.margin)
+            triplet_loss_l10 = triplet_loss_func_L1(w_sketch_features_l10[:, 0, :], class_features, labels,
+                                                    margin=cfg.train.margin)
 
             loss = triplet_loss_scene + triplet_loss_final_layer + triplet_loss_l7 + triplet_loss_l10
 
@@ -200,7 +192,7 @@ def main(configs):
             epoch_avg_loss = total_loss / batch_count
             epoch_losses.append(epoch_avg_loss)
 
-        # 训练1个epoch后
+            # 训练1个epoch后
         if cfg.wandb.enable:
             wandb.log({"epoch": epoch,
                        "Epoch Average Train Loss": epoch_avg_loss})
@@ -222,7 +214,7 @@ def main(configs):
         save_checkpoint(checkpoint, f"{ckpt_dir}/last.pth")
 
         if epoch == 0 or (epoch + 1) % int(cfg.train.save_every) == 0:
-            if epoch==0 or epoch == num_epochs - 1:
+            if epoch == 0 or epoch == num_epochs - 1:
                 for name, param in model.named_parameters():
                     if param.requires_grad and name in init_params:
                         diff = torch.norm(param - init_params[name])
@@ -233,7 +225,11 @@ def main(configs):
                             print(f"参数 {name} 无变化！")  # 仅验证第一个epoch
             torch.save(model.state_dict(), f"checkpoint/{log_dir}/model_{epoch + 1}.pth")
             print("saved", f" checkpoint/{log_dir}/model_{epoch + 1}.pth")
-        # return scene_features, class_features
+
+
+
+
+
 
 if __name__ == "__main__":
     config = Config("./configs/base_train_template.yaml")

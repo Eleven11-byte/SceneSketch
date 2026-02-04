@@ -38,7 +38,6 @@ def main(configs):
 
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    # device = torch.device("cpu")
 
     model = ModifiedCLIP(cfg=cfg, device=device)
     model = model.float()
@@ -127,7 +126,7 @@ def main(configs):
 
 
             caption_features = model.encode_text(captions_pair)
-            class_features = model.encode_text(classes, use_template_embedding=cfg.train.use_template_embedding) #NOTE: 可以在这里改是否在训练时使用template
+            class_features = model.encode_text(classes, use_prompt=cfg.MODEL.USE_PROMPT) #NOTE: 可以在这里改是否在训练时使用template
             scene_features_layers, attn, sketch_mid_feats_layers = model.encode_image(sketches_w, type="sketch")
 
             scene_features = scene_features_layers[-1].permute(1, 0, 2)  # FIXME: 改具体的层数，目前取最后一层对齐

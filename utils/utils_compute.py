@@ -71,9 +71,9 @@ def compute_miou(gt_seg, pred_seg, all_classes):
     return miou
 
 def process_image(model, device, image,ori_img,fg_classes, bg_classes, segmentation_threshold: float,
-                  class_threshold: float, idx: int):
+                  class_threshold: float, idx: int, fuse_type="default"):
     image = model.preprocess(Image.fromarray(image))[None]
-    pred_mask, final_score = model(image.to(device), text_classes=fg_classes, bg_classes=bg_classes, idx=idx)
+    pred_mask, final_score = model(image.to(device), text_classes=fg_classes, bg_classes=bg_classes, idx=idx, fuse_type=fuse_type)
     pred_mask = F.interpolate(pred_mask[None], size=(ori_img.shape[-2], ori_img.shape[-1]), mode='bilinear')[0]
     pred_mask[final_score < class_threshold] = 0
     pred_mask = torch.cat([torch.ones_like(pred_mask[:1]) * segmentation_threshold, pred_mask]) #TODO：拼接背景通道到第0维

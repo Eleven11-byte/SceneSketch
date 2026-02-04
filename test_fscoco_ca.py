@@ -24,7 +24,7 @@ import csv
 from datetime import datetime
 import pandas as pd
 # from models.modified_clip.model import CLIPer
-from models.modified_model import ModifiedCLIP
+from models.modified_model_ca import ModifiedCLIP_ca
 from utils.utils_visualization import visualize_segmentation_overlay
 
 PALETTE = np.array([[0, 0, 0], [128, 0, 0], [0, 128, 0], [128, 128, 0],
@@ -73,7 +73,7 @@ def main():
 
         bg_classes = ["blank_pixel"]
         ori_img = torch.tensor(o_sketch.astype(float)).permute(2, 0, 1) / 255.
-        pred_mask = process_image(model, device, o_sketch, ori_img, fg_classes, bg_classes, segmentation_threshold, class_threshold, idx, fuse_type=cfg.fuse_type)
+        pred_mask = process_image(model, device, o_sketch, ori_img, fg_classes, bg_classes, segmentation_threshold, class_threshold, idx)
         pred_sketch_seg = pred_mask.cpu().numpy()
         img_name = img_path.split('/')[-1].split('.')[0]
         result_file = os.path.join(save_dir, f"{img_name}_1.jpg")
@@ -135,16 +135,16 @@ if __name__ == '__main__':
     cfg = Config("configs/test.yaml")
     cfg.update_from_cli()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # device = "cpu"
     cfg.semantic_templates = [line.strip() for line in list(open(cfg.semantic_templates))]
-    model = ModifiedCLIP(cfg, device=device)
+    cfg.use_cross_attn = True
+    model = ModifiedCLIP_ca(cfg, device=device)
     model = model.float()
 
     # NOTE: 加载训练后的参数
 
-    state_dict = torch.load(cfg.checkpoint_path)
-    load_info = model.load_state_dict(state_dict, strict=False)
-    print(load_info)
+    # state_dict = torch.load(cfg.checkpoint_path)
+    # load_info = model.load_state_dict(state_dict, strict=False)
+    # print(load_info)
 
 
     model.to(device)
@@ -156,8 +156,6 @@ if __name__ == '__main__':
     # print(cfg, CLIPer.attn_refine)
     visualized = False
 
-    # print(cfg)
-    print(cfg.checkpoint_path)
-    print(cfg.fuse_type)
+    print(cfg)
 
     main()

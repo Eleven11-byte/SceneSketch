@@ -1,0 +1,21 @@
+方法,备注,Pixel Accuracy,Stroke Accuracy,mIoU
+论文数据,,0.85540,0.87020,0.73480
+best_miou,,0.83952,0.85666,0.70722
+SSS方法,以bz=4在本机上训练结果,0.80729,0.82450,0.67045
+base,model_20_best.pth（改变注意力后训练结果，不加蒸馏损失）,0.82212,0.83784,0.68863
+改注意力损失后的基础结果,debug_run_1220/model_20.pth（distill layer7 0.1）,0.83026,0.844320,0.688370
+,蒸馏,,0.83189,
+remote_1230_run4_retrain,蒸馏 layer7 0.1,0.83189,0.84704,0.68687
+,remote_1222_run0_model_20.pth（distill layer7 0.1，远程修复custom_attn后的结果）,0.82524,0.84001,0.69044
+,蒸馏,,0.73794,
+zero-shot CLIP,fuse_atten,0.73794,0.78983,0.5979
+remote_1229_run1,distill a=0.2,0.82424,0.8371,0.68245
+debug_run_1220/model_20.pth,v-v,0.79621,0.81996,0.65705
+debug_run_1220/model_20.pth,fuse_feature false,0.69999,0.82903,0.67801
+,消融,,0.83085,
+remote_1230_run3,attn_map代替similarity map的阈值机制,0.83085,0.85022,0.69007
+remote_14_run1_layer9,蒸馏layer9,0.81607,0.83221,0.67295
+remote_14_run1_layer10,蒸馏layer10,0.81685,0.83217,0.67809
+remote_14_run1_layer12,蒸馏layer12,0.8262,0.8384,0.69002
+,训练时select layer -2,0.81671,0.83399,0.67589
+,蒸馏和attn过滤,0.78002,0.80826,0.63892

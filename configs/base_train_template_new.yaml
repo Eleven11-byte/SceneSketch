@@ -2,10 +2,10 @@
 
 dataset:
   name: "FSCOCOSeg"
-  root: "/home/xiaoyi/project/OpenSketchSeg/DATA/fscoco-seg/train"
+  root: "/media/xiaoyi/系统/Sketchdata/train"
 
 train:
-  batch_size: 4
+  batch_size: 8
   epochs: 20
   lr: 1e-6
   optimizer: "adamw"
@@ -19,10 +19,9 @@ train:
   freeze_text: True
   use_distill: False # 即启用后续的distill loss
   use_template_embedding: False
-  use_cross_attn: True
 
 MODEL: # 保留SSS方法加载模型时需要的参数设置
-  TRANSFER_TYPE: prompt
+  TRANSFER_TYPE: none
   USE_PROMPT: False
   PROMPT:
     NUM_PREFIX: 8  #加在text处的prompt设置
@@ -61,7 +60,7 @@ loss: # 有蒸馏损失，后面应该还会改，暂时这样
 wandb:
   enable: false
   project: "sketch-cliper-project"
-  name: "debug_1230_run2"
+  name: "debug_17_run0"
 
 model_name: "ViT-B/16"
 semantic_templates: "template/car_template.txt"
